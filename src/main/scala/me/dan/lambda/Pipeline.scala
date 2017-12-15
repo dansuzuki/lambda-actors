@@ -5,8 +5,9 @@ import akka.actor.ActorSystem
 import akka.actor.Props
 
 import com.danielasfregola.twitter4s.TwitterStreamingClient
-import com.danielasfregola.twitter4s.entities.Tweet
+import com.danielasfregola.twitter4s.entities.{Tweet}
 import com.danielasfregola.twitter4s.entities.streaming.StreamingMessage
+import com.danielasfregola.twitter4s.entities.streaming.common.{DisconnectMessage, LimitNotice, WarningMessage}
 
 import org.joda.time.DateTime
 
@@ -49,25 +50,33 @@ object Pipeline extends App {
   }
 
   class SpeedAggregator extends Actor {
-    val places = ListBuffer[(Long, String)]()
+
+    val places = {
+      val _m = collection.mutable.Map[(Long, String), Int]()
+      _m.withDefault(k => 0)
+    }
+
     var ctr: Long = 0L
     def receive = {
       case tp: TweetPlace => {
-        places.append((tp.timestamp, tp.place))
+        places((timeGroup(tp.timestamp, 60), tp.place)) += 1
+
         ctr = ctr + 1
-        if(ctr % 50 == 0) aggregate
+        if(ctr % 50 == 0) render
         if(ctr % 1000 == 0) window
       }
       case _ => { }
     }
 
-    def aggregate {
+    def render {
       println("------------------------------")
-      places.map(e => (e._2, 1))
-        .groupBy(_._1)
-        .map(kv => {
-            (kv._1, kv._2.map(_._2).reduce(_ + _))
-          })
+
+      // for the current hour only
+      val start = timeGroup(System.currentTimeMillis, 60)
+
+      places
+        .filter(_._1._1 >= start)
+        .map(kv => (kv._1._2, kv._2))
         .toList
         .sortBy(_._2)
         .reverse
@@ -76,12 +85,23 @@ object Pipeline extends App {
       println("------------------------------\n\n")
     }
 
+    def timeGroup(tm: Long, minutes: Int): Long = {
+      val millis = minutes * 60 * 1000L
+      (tm / millis) * millis
+    }
+
     /**
      * apply the sliding window function on places
      */
     def window {
       val now = DateTime.now().getMillis()
-      places filter(e => now - e._1 > 3600000) foreach(e => { places -= e })
+      val start = timeGroup(System.currentTimeMillis, 60)
+
+      places
+        .filter(_._1._1 < start)
+        .keys
+        .foreach(k => places.remove(k))
+
     }
   }
 
@@ -97,6 +117,12 @@ object Pipeline extends App {
       dataSinker ! tp
       speedAggregator ! tp
     }
+
+    case dm: DisconnectMessage => { println(dm) }
+    case lm: LimitNotice => { println(lm) }
+    case wm: WarningMessage => { println(wm) }
+
+    case _ => { println("Catch all handler") }
   }
 
 
